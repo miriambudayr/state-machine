@@ -1,3 +1,5 @@
+import { assert } from "./libs/errors";
+
 enum JobStates {
   Created = "Created",
   Processing = "Processing",
@@ -44,3 +46,27 @@ const stateMachine: StateMachine = {
   [JobStates.Cancelled]: {},
   [JobStates.Failed]: {},
 };
+
+class Job {
+  name: string;
+  created_at = new Date();
+  state: JobState = JobStates.Created;
+
+  constructor(name: string) {
+    this.name = name;
+  }
+
+  performAction(action: JobAction) {
+    const next = stateMachine[this.state][action];
+    assert(next !== undefined, "Invalid state transition", {
+      from: this.state,
+      action,
+    });
+
+    console.log(
+      `Transitioning from ${this.state} to ${next} via ${action} action`
+    );
+
+    this.state = next;
+  }
+}
