@@ -46,11 +46,14 @@ const stateMachine: StateMachine = {
   [JobStates.Failed]: {},
 };
 
+const MAX_FAILURES = 2;
+
 class Job {
   id: string = uuid();
   name: string;
   created_at = new Date();
   priority: Priority;
+  private numFailures = 0;
   fn: () => void;
   state: JobState = JobStates.Created;
 
@@ -76,6 +79,14 @@ class Job {
 
   getState(): JobState {
     return this.state;
+  }
+
+  onFailure() {
+    this.numFailures++;
+  }
+
+  canRetry() {
+    return this.numFailures < MAX_FAILURES;
   }
 }
 
@@ -103,12 +114,20 @@ export class JobManager {
 
         job.performAction(JobActions.Start);
 
-        try {
-          job.fn();
-          job.performAction(JobActions.Complete);
-        } catch (e) {
-          console.error("JobFailed", { id: job.id, name: job.name });
-          job.performAction(JobActions.Fail);
+        while (job.canRetry()) {
+          try {
+            job.fn();
+            job.performAction(JobActions.Complete);
+            break;
+          } catch (e) {
+            console.error("JobFailed", { id: job.id, name: job.name });
+            job.onFailure();
+            if (!job.canRetry()) {
+              job.performAction(JobActions.Fail);
+            }
+          } finally {
+            this.jobs[priority].delete(job.id);
+          }
         }
       }
     });

@@ -70,5 +70,44 @@ describe("JobManager", () => {
       expect(lowPriorityJobRanAt === null).toBe(false);
       expect(hiPriorityJobRanAt).toBeLessThan(lowPriorityJobRanAt);
     });
+
+    it("should retry failed jobs", () => {
+      const manager = new JobManager();
+      let count = 0;
+      const job1 = manager.createJob(
+        "test-job-1",
+        () => {
+          count++;
+          throw new Error("TestError");
+        },
+        Priority.high
+      );
+
+      expect(job1.getState()).toEqual(JobStates.Created);
+
+      manager.runJobs();
+
+      expect(job1.getState()).toEqual(JobStates.Failed);
+      expect(count).toBe(2);
+
+      count = 0;
+
+      const job2 = manager.createJob(
+        "test-job-2",
+        () => {
+          count++;
+          if (count >= 2) {
+            return;
+          }
+
+          throw new Error("TestError");
+        },
+        Priority.high
+      );
+
+      manager.runJobs();
+
+      expect(job2.state).toEqual(JobStates.Completed);
+    });
   });
 });
