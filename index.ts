@@ -4,7 +4,6 @@ import { uuid } from "uuidv4";
 export enum JobStates {
   Created = "Created",
   Processing = "Processing",
-  Paused = "Paused",
   Completed = "Completed",
   Cancelled = "Cancelled",
   Failed = "Failed",
@@ -12,11 +11,15 @@ export enum JobStates {
 
 enum JobActions {
   Start = "Start",
-  Pause = "Pause",
-  Resume = "Resume",
   Complete = "Complete",
   Cancel = "Cancel",
   Fail = "Fail",
+}
+
+export enum Priority {
+  low = "low",
+  medium = "medium",
+  high = "high",
 }
 
 type StateMachine = {
@@ -34,14 +37,9 @@ const stateMachine: StateMachine = {
     [JobActions.Cancel]: JobStates.Cancelled,
   },
   [JobStates.Processing]: {
-    [JobActions.Pause]: JobStates.Paused,
     [JobActions.Complete]: JobStates.Completed,
     [JobActions.Cancel]: JobStates.Cancelled,
     [JobActions.Fail]: JobStates.Failed,
-  },
-  [JobStates.Paused]: {
-    [JobActions.Resume]: JobStates.Processing,
-    [JobActions.Cancel]: JobStates.Cancelled,
   },
   [JobStates.Completed]: {},
   [JobStates.Cancelled]: {},
@@ -52,12 +50,14 @@ class Job {
   id: string = uuid();
   name: string;
   created_at = new Date();
+  priority: Priority;
   fn: () => void;
   state: JobState = JobStates.Created;
 
-  constructor(name: string, fn: () => void) {
+  constructor(name: string, fn: () => void, priority: Priority) {
     this.name = name;
     this.fn = fn;
+    this.priority = priority;
   }
 
   performAction(action: JobAction) {
@@ -80,31 +80,37 @@ class Job {
 }
 
 export class JobManager {
-  private jobs: Map<string, Job> = new Map();
+  private jobs: { [priority in Priority]: Map<string, Job> } = {
+    [Priority.high]: new Map(),
+    [Priority.medium]: new Map(),
+    [Priority.low]: new Map(),
+  };
 
-  createJob(name: string, fn: () => void): Job {
-    const job = new Job(name, fn);
-    this.jobs.set(job.id, job);
+  createJob(name: string, fn: () => void, priority: Priority): Job {
+    const job = new Job(name, fn, priority);
+    this.jobs[priority].set(job.id, job);
     return job;
   }
 
   runJobs() {
-    for (const job of this.jobs.values()) {
-      assert(
-        job.state === JobStates.Created,
-        "expected job to be in the Created state",
-        { actual: job.state }
-      );
+    [Priority.high, Priority.medium, Priority.low].map((priority) => {
+      for (const job of this.jobs[priority].values()) {
+        assert(
+          job.state === JobStates.Created,
+          "expected job to be in the Created state",
+          { actual: job.state }
+        );
 
-      job.performAction(JobActions.Start);
+        job.performAction(JobActions.Start);
 
-      try {
-        job.fn();
-        job.performAction(JobActions.Complete);
-      } catch (e) {
-        console.error("JobFailed", { id: job.id, name: job.name });
-        job.performAction(JobActions.Fail);
+        try {
+          job.fn();
+          job.performAction(JobActions.Complete);
+        } catch (e) {
+          console.error("JobFailed", { id: job.id, name: job.name });
+          job.performAction(JobActions.Fail);
+        }
       }
-    }
+    });
   }
 }
