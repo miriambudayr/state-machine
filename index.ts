@@ -1,6 +1,7 @@
 import { assert } from "./libs/errors";
+import { uuid } from "uuidv4";
 
-enum JobStates {
+export enum JobStates {
   Created = "Created",
   Processing = "Processing",
   Paused = "Paused",
@@ -48,12 +49,15 @@ const stateMachine: StateMachine = {
 };
 
 class Job {
+  id: string = uuid();
   name: string;
   created_at = new Date();
+  fn: () => void;
   state: JobState = JobStates.Created;
 
-  constructor(name: string) {
+  constructor(name: string, fn: () => void) {
     this.name = name;
+    this.fn = fn;
   }
 
   performAction(action: JobAction) {
@@ -68,5 +72,39 @@ class Job {
     );
 
     this.state = next;
+  }
+
+  getState(): JobState {
+    return this.state;
+  }
+}
+
+export class JobManager {
+  private jobs: Map<string, Job> = new Map();
+
+  createJob(name: string, fn: () => void): Job {
+    const job = new Job(name, fn);
+    this.jobs.set(job.id, job);
+    return job;
+  }
+
+  runJobs() {
+    for (const job of this.jobs.values()) {
+      assert(
+        job.state === JobStates.Created,
+        "expected job to be in the Created state",
+        { actual: job.state }
+      );
+
+      job.performAction(JobActions.Start);
+
+      try {
+        job.fn();
+        job.performAction(JobActions.Complete);
+      } catch (e) {
+        console.error("JobFailed", { id: job.id, name: job.name });
+        job.performAction(JobActions.Fail);
+      }
+    }
   }
 }
