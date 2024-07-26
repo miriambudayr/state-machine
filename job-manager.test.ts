@@ -111,7 +111,7 @@ describe("JobManager", () => {
 
       await manager.runJobs(maxFailures);
 
-      expect(job2.state).toEqual(JobStates.Completed);
+      expect(job2.getState()).toEqual(JobStates.Completed);
     });
 
     it("should retry failed jobs with backoff", async () => {
@@ -153,5 +153,28 @@ describe("JobManager", () => {
       expect(job1.getState()).toEqual(JobStates.Failed);
       expect(count).toBe(maxFailures);
     }, 10_000);
+  });
+
+  describe(".cancelJob", () => {
+    it("can cancel a job", async () => {
+      const manager = new JobManager();
+      const job = manager.createJob(
+        "test-job-1",
+        (signal: AbortSignal) => {
+          if (signal.aborted) {
+            throw new Error("AbortError");
+          }
+        },
+        Priority.high
+      );
+
+      expect(job.getState()).toEqual(JobStates.Created);
+
+      manager.cancel(job.id);
+      const maxFailures = 0;
+      await manager.runJobs(maxFailures);
+
+      expect(job.getState()).toEqual(JobStates.Cancelled);
+    });
   });
 });
