@@ -92,25 +92,59 @@ export class JobManager {
     return job;
   }
 
-  runJobs() {
-    [Priority.high, Priority.medium, Priority.low].map((priority) => {
-      for (const job of this.jobs[priority].values()) {
-        assert(
-          job.state === JobStates.Created,
-          "expected job to be in the Created state",
-          { actual: job.state }
-        );
+  async runJobs(maxFailures: number) {
+    for (const priority of [Priority.high, Priority.medium, Priority.low]) {
+      await Promise.all(
+        Array.from(this.jobs[priority].values()).map(async (job) => {
+          assert(
+            job.state === JobStates.Created,
+            "expected job to be in the Created state",
+            { actual: job.state }
+          );
 
-        job.performAction(JobActions.Start);
+          job.performAction(JobActions.Start);
 
-        try {
-          job.fn();
-          job.performAction(JobActions.Complete);
-        } catch (e) {
-          console.error("JobFailed", { id: job.id, name: job.name });
-          job.performAction(JobActions.Fail);
-        }
+          try {
+            await withExponentialBackoff(job.fn, maxFailures, 1000);
+            job.performAction(JobActions.Complete);
+          } catch (e) {
+            console.error("JobFailed", { id: job.id, name: job.name });
+            job.performAction(JobActions.Fail);
+          }
+
+          this.jobs[priority].delete(job.id);
+        })
+      );
+    }
+  }
+}
+
+async function waitForTime(time_ms: number) {
+  return new Promise((res) => {
+    setTimeout(res, time_ms);
+  });
+}
+
+async function withExponentialBackoff(
+  fn: () => void,
+  maxFailures: number,
+  baseBackoffMillis: number
+) {
+  let attempt = 0;
+
+  while (true) {
+    try {
+      return fn();
+    } catch (e) {
+      attempt++;
+
+      if (attempt >= maxFailures) {
+        throw e;
       }
-    });
+
+      const delay = 2 ** attempt * (baseBackoffMillis / 2);
+      const jitter = Math.random() * (baseBackoffMillis / 2);
+      await waitForTime(delay + jitter);
+    }
   }
 }
