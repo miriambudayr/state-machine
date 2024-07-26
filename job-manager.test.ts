@@ -158,10 +158,12 @@ describe("JobManager", () => {
   describe(".cancelJob", () => {
     it("can cancel a job", async () => {
       const manager = new JobManager();
+      let threwAbortError = false;
       const job = manager.createJob(
         "test-job-1",
         (signal: AbortSignal) => {
           if (signal.aborted) {
+            threwAbortError = true;
             throw new Error("AbortError");
           }
         },
@@ -169,12 +171,114 @@ describe("JobManager", () => {
       );
 
       expect(job.getState()).toEqual(JobStates.Created);
+      expect(threwAbortError).toEqual(false);
 
       manager.cancel(job.id);
       const maxFailures = 0;
       await manager.runJobs(maxFailures);
 
       expect(job.getState()).toEqual(JobStates.Cancelled);
+      expect(threwAbortError).toEqual(false);
+    });
+
+    it("can cancel a job while it is running", async () => {
+      const manager = new JobManager();
+
+      let threwAbortError = false;
+
+      const job = manager.createJob(
+        "test-job-1",
+        (signal: AbortSignal) => {
+          // Simulate a long-running job
+          return new Promise((resolve) => setTimeout(resolve, 5000)).then(
+            () => {
+              if (signal.aborted) {
+                threwAbortError = true;
+                throw new Error("AbortError");
+              }
+            }
+          );
+        },
+        Priority.high
+      );
+
+      expect(job.getState()).toEqual(JobStates.Created);
+      expect(threwAbortError).toEqual(false);
+
+      const maxFailures = 0;
+      const jobsPromise = manager.runJobs(maxFailures);
+
+      // Allow some time for the job to start
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      manager.cancel(job.id);
+
+      await jobsPromise;
+
+      expect(job.getState()).toEqual(JobStates.Cancelled);
+      expect(threwAbortError).toEqual(true);
+    }, 10_000);
+
+    it("can cancel a job while it is running even if the task does not respond to the abort signal", async () => {
+      const manager = new JobManager();
+      let abortedWhileExecuting = false;
+      let executionStarted = false;
+      const job = manager.createJob(
+        "test-job-1",
+        (signal: AbortSignal) => {
+          executionStarted = true;
+
+          // Simulate a long-running job
+          return new Promise((resolve) => setTimeout(resolve, 5000)).then(
+            () => {
+              if (signal.aborted) {
+                // Check the abort signal but do not throw an error in response.
+                abortedWhileExecuting = true;
+              }
+            }
+          );
+        },
+        Priority.high
+      );
+
+      expect(job.getState()).toEqual(JobStates.Created);
+      expect(executionStarted).toEqual(false);
+
+      const maxFailures = 0;
+      const runJobsPromise = manager.runJobs(maxFailures);
+
+      // Allow some time for the job to start
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(executionStarted).toEqual(true);
+      expect(abortedWhileExecuting).toEqual(false);
+      manager.cancel(job.id);
+
+      await runJobsPromise;
+
+      expect(job.getState()).toEqual(JobStates.Cancelled);
+      expect(abortedWhileExecuting).toEqual(true);
+    }, 10_000);
+
+    it("cannot cancel a completed job", async () => {
+      const manager = new JobManager();
+      let jobRan = false;
+      const job = manager.createJob(
+        "test-job-1",
+        () => {
+          jobRan = true;
+        },
+        Priority.high
+      );
+
+      expect(job.getState()).toEqual(JobStates.Created);
+
+      const maxFailures = 2;
+      await manager.runJobs(maxFailures);
+
+      expect(job.getState()).toEqual(JobStates.Completed);
+      expect(jobRan).toBe(true);
+
+      expect(() => manager.cancel(job.id)).toThrow();
     });
   });
 });

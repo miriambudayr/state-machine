@@ -42,7 +42,15 @@ const stateMachine: StateMachine = {
     [JobActions.Fail]: JobStates.Failed,
   },
   [JobStates.Completed]: {},
-  [JobStates.Cancelled]: {},
+  // The easiest way to manage asynchronous cancellation is to generously define all possible actions
+  // that can be taken on the `JobStates.Cancelled` state rather than adding brittle job state checks
+  // throughout the code (I tried this and it wasn't good; then remembered the problems state machines solve).
+  [JobStates.Cancelled]: {
+    [JobActions.Start]: JobStates.Cancelled,
+    [JobActions.Complete]: JobStates.Cancelled,
+    [JobActions.Cancel]: JobStates.Cancelled,
+    [JobActions.Fail]: JobStates.Cancelled,
+  },
   [JobStates.Failed]: {},
 };
 
@@ -89,9 +97,20 @@ class Job {
   abort() {
     this.abortController.abort();
   }
+
+  getSummary() {
+    return {
+      name: this.name,
+      priority: this.getPriority(),
+      id: this.id,
+      state: this.getState(),
+    };
+  }
 }
 
 export class JobManager {
+  // invariant: each job is added to both the `JobManager.jobs` data structure
+  // and the `JobManager.jobsById` map.
   private jobs: { [priority in Priority]: Map<string, Job> } = {
     [Priority.high]: new Map(),
     [Priority.medium]: new Map(),
@@ -102,6 +121,64 @@ export class JobManager {
   // and the `JobManager.jobsById` map.
   private jobsById: Map<string, Job> = new Map();
 
+  private isCancelled(job: Job) {
+    if (job.getState() === JobStates.Cancelled) {
+      // Jobs should be removed from state by the `.cancel` method.
+      // This check is defensive.
+      this.assertJobRemoved(job);
+      return true;
+    }
+
+    return false;
+  }
+
+  private assertTerminalState(job: Job) {
+    const state = job.getState();
+    const isTerminalState =
+      Object.keys(stateMachine[state]).length === 0 ||
+      job.getState() === JobStates.Cancelled;
+    assert(isTerminalState, "unexpected terminal state", { jobState: state });
+  }
+
+  private assertJobRemoved(job: Job) {
+    assert(
+      this.jobsById.get(job.id) === undefined,
+      "cancelled job should have been removed from jobsById map",
+      { jobId: job.id, jobState: job.getState() }
+    );
+
+    assert(
+      this.jobs[job.getPriority()].get(job.id) === undefined,
+      "cancelled job should have been removed from the priority jobs map",
+      { jobId: job.id, jobState: job.getState() }
+    );
+  }
+
+  private removeJob(job: Job) {
+    this.assertTerminalState(job);
+    this.jobs[job.getPriority()].delete(job.id);
+    this.jobsById.delete(job.id);
+    this.assertJobRemoved(job);
+  }
+
+  private transitionState(job: Job, action: JobAction) {
+    const next = stateMachine[job.getState()][action];
+    assert(next !== undefined, "Invalid state transition", {
+      from: job.getState(),
+      action,
+    });
+
+    console.log("TransitioningState", {
+      from: job.getState(),
+      to: next,
+      action,
+      id: job.id,
+      name: job.name,
+    });
+
+    job.setState(next);
+  }
+
   createJob(
     name: string,
     fn: (abortSignal: AbortSignal) => void,
@@ -110,28 +187,21 @@ export class JobManager {
     const job = new Job(name, fn, priority);
     this.jobs[priority].set(job.id, job);
     this.jobsById.set(job.id, job);
+
+    console.log("JobCreated", job.getSummary());
     return job;
   }
 
   async runJobs(maxFailures: number) {
+    console.log("WillRunJobs");
     for (const priority of [Priority.high, Priority.medium, Priority.low]) {
       await Promise.all(
         Array.from(this.jobs[priority].values()).map(async (job) => {
-          try {
-            if (job.getState() === JobStates.Cancelled) {
-              // Jobs should be removed from state by the `.cancel` method.
-              // This check is defensive.
-              assert(
-                this.jobsById.get(job.id) === undefined,
-                "cancelled job should have been removed from jobsById map",
-                { jobId: job.id, jobState: job.getState() }
-              );
+          console.log("WillRunJob", job.getSummary());
 
-              assert(
-                this.jobs[job.getPriority()].get(job.id) === undefined,
-                "cancelled job should have been removed from the priority jobs map",
-                { jobId: job.id, jobState: job.getState() }
-              );
+          try {
+            // Jobs handles can be cancelled while `runJobs` is running, which requires an additional check.
+            if (this.isCancelled(job)) {
               return;
             }
 
@@ -149,7 +219,18 @@ export class JobManager {
               maxFailures,
               1000
             );
+
+            // Job handles can be cancelled while the execution of the job is running.
+            // The state machine will ensure the job remains in the `Cancelled` state.
+            if (this.isCancelled(job)) {
+              console.log(
+                "ExecutionCompletedWithJobCancellation",
+                job.getSummary()
+              );
+            }
+
             this.transitionState(job, JobActions.Complete);
+            console.log("JobCompletedSuccessfully", job.getSummary());
           } catch (e) {
             if (e.name === "AbortError") {
               assert(
@@ -163,13 +244,8 @@ export class JobManager {
             console.error("JobFailed", { id: job.id, name: job.name });
             this.transitionState(job, JobActions.Fail);
           } finally {
-            assert(
-              job.getState() === JobStates.Cancelled ||
-                job.getState() === JobStates.Completed ||
-                job.getState() === JobStates.Failed,
-              "job run resulted in unexpected terminal state",
-              { jobState: job.getState() }
-            );
+            console.log("WillRemoveJob", job.getSummary());
+            this.assertTerminalState(job);
             this.removeJob(job);
           }
         })
@@ -177,38 +253,24 @@ export class JobManager {
     }
   }
 
+  // Idempotent.
+  // This provides no guarantee that the execution of the job function will be immediately terminated because Node.js does not provide
+  // concurrency primitives that allow for that.
+  // This simply guarantees that an in-progress or created job will be cancelled. Upon job creation, user can pass in an abort signal and manage
+  // the job execution control flow via that signal.
   cancel(jobId: string) {
     const job = this.jobsById.get(jobId);
     assert(!!job, "unknown job id", { jobId });
-    this.removeJob(job);
+
+    if (this.isCancelled(job)) {
+      return;
+    }
+
+    console.log("WillCancelJob", job.getSummary());
     this.transitionState(job, JobActions.Cancel);
+    this.removeJob(job);
     job.abort();
-  }
-
-  private removeJob(job: Job) {
-    assert(
-      job.getState() === JobStates.Cancelled ||
-        job.getState() === JobStates.Completed ||
-        job.getState() === JobStates.Failed,
-      "cannot remove job in unexpected terminal state",
-      { jobState: job.getState() }
-    );
-    this.jobs[job.getPriority()].delete(job.id);
-    this.jobsById.delete(job.id);
-  }
-
-  private transitionState(job: Job, action: JobAction) {
-    const next = stateMachine[job.getState()][action];
-    assert(next !== undefined, "Invalid state transition", {
-      from: job.getState(),
-      action,
-    });
-
-    console.log(
-      `Transitioning from ${job.getState()} to ${next} via ${action} action`
-    );
-
-    job.setState(next);
+    console.log("JobCanceled", job.getSummary());
   }
 }
 
